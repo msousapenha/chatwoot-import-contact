@@ -42,7 +42,7 @@ HTML_INDEX = """
             <h2>Subir Planilha de Contatos</h2>
             <a href="{{ url_for('logout') }}" class="btn btn-sm btn-outline-danger">Sair</a>
         </div>
-        <p class="text-muted">Envie um arquivo <b>.xlsx</b> (Excel) ou <b>.csv</b>. A planilha deve ter as colunas <b>Nome</b> e <b>Telefone</b>.</p>
+        <p class="text-muted">Envie um arquivo <b>.xlsx</b> ou <b>.csv</b>. Colunas lidas: Nome, Telefone e Vendedora.</p>
         
         {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert alert-{{ category }}">{{ message }}</div>{% endfor %}{% endif %}{% endwith %}
         
@@ -89,57 +89,79 @@ def index():
     if request.method == 'POST':
         file = request.files.get('file')
         if not file:
-            flash('Nenhum arquivo enviado.', 'danger')
             return redirect(request.url)
 
         filename = file.filename.lower()
-        if not (filename.endswith('.csv') or filename.endswith('.xlsx')):
-            flash('Por favor, envie um arquivo .xlsx ou .csv válido', 'danger')
-            return redirect(request.url)
-
         linhas_processadas = []
 
-        # Lógica para ler XLSX
+        # -- LÓGICA ROBUSTA PARA XLSX --
         if filename.endswith('.xlsx'):
             try:
                 wb = openpyxl.load_workbook(file, data_only=True)
                 sheet = wb.active
                 rows = list(sheet.iter_rows(values_only=True))
-                if len(rows) > 0:
-                    headers_row = [str(h).strip().lower() if h else '' for h in rows[0]]
-                    for row in rows[1:]:
-                        if not any(row): continue # Pula linhas totalmente vazias
-                        row_dict = dict(zip(headers_row, row))
-                        linhas_processadas.append(row_dict)
+                
+                header_idx = -1
+                for i, row in enumerate(rows):
+                    if not any(row): continue
+                    row_str = [str(c).strip().lower() for c in row if c is not None]
+                    if any(x in row_str for x in ['nome', 'name', 'paciente', 'contato']) and any(x in row_str for x in ['telefone', 'celular', 'phone', 'whatsapp']):
+                        header_idx = i
+                        break
+                
+                if header_idx == -1:
+                    flash('Erro: Não encontrei as colunas de Nome e Telefone na planilha.', 'danger')
+                    return redirect(request.url)
+                    
+                headers_row = [str(h).strip().lower() if h else f'vazio_{i}' for i, h in enumerate(rows[header_idx])]
+                
+                for row in rows[header_idx+1:]:
+                    if not any(row): continue
+                    row_dict = dict(zip(headers_row, row))
+                    linhas_processadas.append(row_dict)
             except Exception as e:
-                flash(f'Erro ao ler o arquivo Excel: {str(e)}', 'danger')
+                flash(f'Erro ao ler Excel: {str(e)}', 'danger')
                 return redirect(request.url)
-        
-        # Lógica original para ler CSV mantida como fallback
+                
+        # -- LÓGICA ROBUSTA PARA CSV --
         elif filename.endswith('.csv'):
-            stream = io.StringIO(file.stream.read().decode("UTF8"), newline=None)
-            reader = csv.DictReader(stream, delimiter=';') 
+            content = file.stream.read().decode("utf-8-sig")
+            stream = io.StringIO(content, newline=None)
+            reader = csv.DictReader(stream, delimiter=';')
+            if not reader.fieldnames or len(reader.fieldnames) < 2:
+                stream.seek(0)
+                reader = csv.DictReader(stream, delimiter=',')
+                
             for row in reader:
                 row_lower = {k.strip().lower(): str(v).strip() for k, v in row.items() if k}
                 linhas_processadas.append(row_lower)
 
         headers_api = {"api_access_token": CHATWOOT_TOKEN, "Content-Type": "application/json"}
 
-        # Disparo para o Chatwoot
+        # -- DISPARO PARA API --
         for row_lower in linhas_processadas:
-            nome = row_lower.get('nome') or row_lower.get('name')
-            telefone = row_lower.get('telefone') or row_lower.get('phone_number')
+            nome = row_lower.get('nome') or row_lower.get('paciente') or row_lower.get('name')
+            telefone = row_lower.get('telefone') or row_lower.get('celular') or row_lower.get('phone_number')
+            vendedora = row_lower.get('vendedora') or row_lower.get('vendedor')
 
-            if not nome or not telefone:
-                results.append({"nome": "Linha Inválida", "status": "Erro", "msg": "Colunas Nome ou Telefone ausentes."})
+            if not nome or not telefone or str(telefone).lower() == 'none':
                 continue
             
-            # Limpa o telefone caso o Excel tenha formatado como número float (ex: 55869...0)
-            telefone = str(telefone).replace('.0', '').strip()
-            if not str(telefone).startswith('+'):
+            # Limpeza extrema do telefone
+            telefone = str(telefone).replace('.0', '').replace(' ', '').replace('-', '').replace('(', '').replace(')', '').strip()
+            if not telefone.startswith('+'):
                 telefone = f"+{telefone}"
 
-            payload = {"name": str(nome).strip(), "phone_number": telefone}
+            payload = {
+                "name": str(nome).strip(), 
+                "phone_number": telefone
+            }
+
+            # Injeta custom attributes se a vendedora existir
+            if vendedora and str(vendedora).strip() and str(vendedora).lower() != 'none':
+                payload["custom_attributes"] = {
+                    "vendedora": str(vendedora).strip()
+                }
             
             try:
                 resp = requests.post(CHATWOOT_URL, json=payload, headers=headers_api)
@@ -152,7 +174,7 @@ def index():
                         url_etiqueta = f"{CHATWOOT_URL}/{contact_id}/labels"
                         requests.post(url_etiqueta, json={"labels": ["aceita_promocao"]}, headers=headers_api)
                         
-                    results.append({"nome": nome, "status": "Sucesso", "msg": "Importado com a etiqueta 'aceita_promocao'!"})
+                    results.append({"nome": nome, "status": "Sucesso", "msg": "Importado com sucesso!"})
                 else:
                     results.append({"nome": nome, "status": "Erro", "msg": resp.json().get('message', resp.text)})
             except Exception as e:
