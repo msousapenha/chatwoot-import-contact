@@ -3,6 +3,7 @@ import csv
 import io
 import requests
 import openpyxl
+from datetime import datetime, timezone, timedelta
 from flask import Flask, request, redirect, url_for, session, flash, render_template_string
 
 app = Flask(__name__)
@@ -138,7 +139,26 @@ def index():
 
         headers_api = {"api_access_token": CHATWOOT_TOKEN, "Content-Type": "application/json"}
 
-        # -- DISPARO PARA API --
+        fuso_brasil = timezone(timedelta(hours=-3))
+        data_atual = datetime.now(fuso_brasil).strftime("%d-%m-%Y")
+        nome_da_etiqueta = f"novos_contatos_{data_atual}"
+        
+        url_criar_etiqueta = CHATWOOT_URL.replace('/contacts', '/labels')
+        
+        payload_nova_etiqueta = {
+            "label": {
+                "title": nome_da_etiqueta,
+                "description": f"Contatos importados na data {data_atual}",
+                "color": "#28a745",
+                "show_on_sidebar": True
+            }
+        }
+        
+        try:
+            requests.post(url_criar_etiqueta, json=payload_nova_etiqueta, headers=headers_api)
+        except Exception as e:
+            print(f"Erro ignorado ao criar etiqueta: {e}")
+
         for row_lower in linhas_processadas:
             nome = row_lower.get('nome') or row_lower.get('paciente') or row_lower.get('name')
             telefone = row_lower.get('telefone') or row_lower.get('celular') or row_lower.get('phone_number')
@@ -171,8 +191,9 @@ def index():
                     contact_id = dados.get('contact', {}).get('id') or dados.get('id')
                     
                     if contact_id:
-                        url_etiqueta = f"{CHATWOOT_URL}/{contact_id}/labels"
-                        requests.post(url_etiqueta, json={"labels": ["aceita_promocao"]}, headers=headers_api)
+                        url_etiqueta_contato = f"{CHATWOOT_URL}/{contact_id}/labels"
+                        
+                        requests.post(url_etiqueta_contato, json={"labels": ["aceita_promocao", nome_da_etiqueta]}, headers=headers_api)
                         
                     results.append({"nome": nome, "status": "Sucesso", "msg": "Importado com sucesso!"})
                 else:
